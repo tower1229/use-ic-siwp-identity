@@ -6,10 +6,10 @@ import {
 
 import type { SiweIdentityStorage } from "./storage.type";
 
-const STORAGE_KEY = "siweIdentity";
+const STORAGE_KEY = "siwpIdentity";
 
 /**
- * Loads the SIWE identity from local storage.
+ * Loads the SIWP identity from local storage.
  */
 export function loadIdentity() {
   const storedState = localStorage.getItem(STORAGE_KEY);
@@ -33,7 +33,7 @@ export function loadIdentity() {
 }
 
 /**
- * Saves the SIWE identity to local storage.
+ * Saves the SIWP identity to local storage.
  */
 export function saveIdentity(
   address: string,
@@ -51,7 +51,7 @@ export function saveIdentity(
 }
 
 /**
- * Clears the SIWE identity from local storage.
+ * Clears the SIWP identity from local storage.
  */
 export function clearIdentity() {
   localStorage.removeItem(STORAGE_KEY);

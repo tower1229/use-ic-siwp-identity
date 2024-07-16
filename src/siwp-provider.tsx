@@ -7,7 +7,7 @@ import {
   type ActorSubclass,
 } from "@dfinity/agent";
 import type { IDL } from "@dfinity/candid";
-import type { SIWE_IDENTITY_SERVICE } from "./service.interface";
+import type { IDENTITY_SERVICE } from "./service.interface";
 
 /**
  * Creates an anonymous actor for interactions with the Internet Computer.
@@ -36,46 +36,27 @@ export function createAnonymousActor({
     });
   }
 
-  return Actor.createActor<SIWE_IDENTITY_SERVICE>(idlFactory, {
+  return Actor.createActor<IDENTITY_SERVICE>(idlFactory, {
     agent,
     canisterId,
     ...actorOptions,
   });
 }
 
-export async function callPrepareLogin(
-  anonymousActor: ActorSubclass<SIWE_IDENTITY_SERVICE>,
-  address: `0x${string}` | undefined
-) {
-  if (!anonymousActor || !address) {
-    throw new Error("Invalid actor or address");
-  }
-
-  const response = await anonymousActor.siwe_prepare_login(address);
-
-  if ("Err" in response) {
-    throw new Error(response.Err);
-  }
-
-  return response.Ok;
-}
-
 /**
- * Logs in the user by sending a signed SIWE message to the backend.
+ * Logs in the user by sending a signed SIWP message to the backend.
  */
 export async function callLogin(
-  anonymousActor: ActorSubclass<SIWE_IDENTITY_SERVICE>,
-  data: `0x${string}` | undefined,
-  address: `0x${string}` | undefined,
+  anonymousActor: ActorSubclass<IDENTITY_SERVICE>,
+  username: string | undefined,
   sessionPublicKey: DerEncodedPublicKey
 ) {
-  if (!anonymousActor || !data || !address) {
-    throw new Error("Invalid actor, data or address");
+  if (!anonymousActor || !username) {
+    throw new Error("Invalid actor or username");
   }
 
-  const loginReponse = await anonymousActor.siwe_login(
-    data,
-    address,
+  const loginReponse = await anonymousActor.siwp_login(
+    username,
     new Uint8Array(sessionPublicKey)
   );
 
@@ -90,8 +71,8 @@ export async function callLogin(
  * Retrieves a delegation from the backend for the current session.
  */
 export async function callGetDelegation(
-  anonymousActor: ActorSubclass<SIWE_IDENTITY_SERVICE>,
-  address: `0x${string}` | undefined,
+  anonymousActor: ActorSubclass<IDENTITY_SERVICE>,
+  address: string | undefined,
   sessionPublicKey: DerEncodedPublicKey,
   expiration: bigint
 ) {
@@ -99,7 +80,7 @@ export async function callGetDelegation(
     throw new Error("Invalid actor or address");
   }
 
-  const response = await anonymousActor.siwe_get_delegation(
+  const response = await anonymousActor.siwp_get_delegation(
     address,
     new Uint8Array(sessionPublicKey),
     expiration
