@@ -1,7 +1,21 @@
-import { DelegationChain, DelegationIdentity } from "@dfinity/identity";
+import {
+  DelegationChain,
+  DelegationIdentity,
+  Ed25519KeyIdentity,
+} from "@dfinity/identity";
 import type { LoginStatus, PrepareLoginStatus } from "./state.type";
 
+export type IdentityLoginResponse = {
+  identity: DelegationIdentity;
+  username: string;
+  sessionIdentity: Ed25519KeyIdentity;
+  delegationChain: DelegationChain;
+};
+
 export type IdentityContextType = {
+  // currentUsername
+  uid?: string;
+
   /** Is set to `true` on mount until a stored identity is loaded from local storage or
    * none is found. */
   isInitializing: boolean;
@@ -25,7 +39,7 @@ export type IdentityContextType = {
   prepareLoginError?: Error;
 
   /** Initiates the login process by passkey authentication. */
-  login: (username: string) => Promise<DelegationIdentity | undefined>;
+  login: (uid?: string) => Promise<IdentityLoginResponse>;
 
   /** Reflects the current status of the login process. */
   loginStatus: LoginStatus;

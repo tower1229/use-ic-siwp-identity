@@ -14,6 +14,6 @@ export type State = {
   loginStatus: LoginStatus;
   loginError?: Error;
   identity?: DelegationIdentity;
-  identityAddress?: string;
+  uid?: string;
   delegationChain?: DelegationChain;
 };

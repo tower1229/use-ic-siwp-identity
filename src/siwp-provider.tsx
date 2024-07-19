@@ -8,6 +8,7 @@ import {
 } from "@dfinity/agent";
 import type { IDL } from "@dfinity/candid";
 import type { IDENTITY_SERVICE } from "./service.interface";
+import { startAuthentication } from "@simplewebauthn/browser";
 
 /**
  * Creates an anonymous actor for interactions with the Internet Computer.
@@ -18,16 +19,18 @@ export function createAnonymousActor({
   canisterId,
   httpAgentOptions,
   actorOptions,
+  isLocalNetwork,
 }: {
   idlFactory: IDL.InterfaceFactory;
   canisterId: string;
   httpAgentOptions?: HttpAgentOptions;
   actorOptions?: ActorConfig;
+  isLocalNetwork?: boolean;
 }) {
   if (!idlFactory || !canisterId) return;
   const agent = new HttpAgent({ ...httpAgentOptions });
 
-  if (process.env.DFX_NETWORK !== "ic") {
+  if (isLocalNetwork) {
     agent.fetchRootKey().catch((err) => {
       console.warn(
         "Unable to fetch root key. Check to ensure that your local replica is running"
@@ -43,22 +46,65 @@ export function createAnonymousActor({
   });
 }
 
+export async function callPrepareLogin(
+  anonymousActor: ActorSubclass<IDENTITY_SERVICE>,
+  username?: string
+) {
+  if (!anonymousActor) {
+    throw new Error("Invalid actor");
+  }
+
+  const response =
+    username !== undefined
+      ? await anonymousActor.siwp_prepare_login_username(username)
+      : await anonymousActor.siwp_prepare_login();
+
+  if (!Array.isArray(response) && !response) {
+    throw new Error("Invalid prepare response");
+  }
+
+  // webauthn
+  const webauthnConfig = Array.isArray(response) ? response[0] : response;
+  const authOptions = JSON.parse(webauthnConfig).publicKey;
+  // step 2
+  const asseResp = await startAuthentication({
+    ...authOptions,
+  }).catch(() => {
+    throw new Error(`Webauthn fail`);
+  });
+
+  return Array.isArray(response)
+    ? [JSON.stringify(asseResp), response[1]]
+    : JSON.stringify(asseResp);
+}
+
 /**
  * Logs in the user by sending a signed SIWP message to the backend.
  */
 export async function callLogin(
   anonymousActor: ActorSubclass<IDENTITY_SERVICE>,
-  username: string | undefined,
-  sessionPublicKey: DerEncodedPublicKey
+  webauthnResponse: string,
+  sessionPublicKey: DerEncodedPublicKey,
+  authenticationState?: string,
+  username?: string
 ) {
-  if (!anonymousActor || !username) {
-    throw new Error("Invalid actor or username");
+  if (!anonymousActor) {
+    throw new Error("Invalid actor");
   }
 
-  const loginReponse = await anonymousActor.siwp_login(
-    username,
-    new Uint8Array(sessionPublicKey)
-  );
+  const loginReponse =
+    username === undefined && authenticationState
+      ? await anonymousActor.siwp_login(
+          webauthnResponse,
+          authenticationState,
+          new Uint8Array(sessionPublicKey),
+          []
+        )
+      : await anonymousActor.siwp_login_username(
+          webauthnResponse,
+          new Uint8Array(sessionPublicKey),
+          []
+        );
 
   if ("Err" in loginReponse) {
     throw new Error(loginReponse.Err);
@@ -72,16 +118,16 @@ export async function callLogin(
  */
 export async function callGetDelegation(
   anonymousActor: ActorSubclass<IDENTITY_SERVICE>,
-  address: string | undefined,
+  username: string | undefined,
   sessionPublicKey: DerEncodedPublicKey,
   expiration: bigint
 ) {
-  if (!anonymousActor || !address) {
-    throw new Error("Invalid actor or address");
+  if (!anonymousActor || !username) {
+    throw new Error("Invalid actor or username");
   }
 
   const response = await anonymousActor.siwp_get_delegation(
-    address,
+    username,
     new Uint8Array(sessionPublicKey),
     expiration
   );

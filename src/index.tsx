@@ -9,10 +9,13 @@ import {
 } from "react";
 import { type ActorConfig, type HttpAgentOptions } from "@dfinity/agent";
 import { DelegationIdentity, Ed25519KeyIdentity } from "@dfinity/identity";
-import type { IdentityContextType } from "./context.type";
+import type {
+  IdentityContextType,
+  IdentityLoginResponse,
+} from "./context.type";
 import { IDL } from "@dfinity/candid";
 import type {
-  LoginOkResponse,
+  BindingDelegationDeatils,
   SignedDelegation as ServiceSignedDelegation,
 } from "./service.interface";
 import { clearIdentity, loadIdentity, saveIdentity } from "./local-storage";
@@ -20,6 +23,7 @@ import {
   callGetDelegation,
   callLogin,
   createAnonymousActor,
+  callPrepareLogin,
 } from "./siwp-provider";
 import type { State } from "./state.type";
 import { createDelegationChain } from "./delegation";
@@ -31,6 +35,7 @@ import { normalizeError } from "./error";
 export * from "./context.type";
 export * from "./service.interface";
 export * from "./storage.type";
+export * from "./local-storage";
 
 /**
  * React context for managing SIWP (Sign-In with Passkey) identity.
@@ -84,6 +89,7 @@ export function IdentityProvider({
   actorOptions,
   idlFactory,
   canisterId,
+  isLocalNetwork,
   children,
 }: {
   /** Configuration options for the HTTP agent used to communicate with the Internet Computer network. */
@@ -98,9 +104,20 @@ export function IdentityProvider({
   /** The unique identifier of the canister on the Internet Computer network. This ID is used to establish a connection to the canister. */
   canisterId: string;
 
+  /**
+   * If true, the provider will use the local network instead of the main network.
+   * This is useful for testing purposes.
+   */
+  isLocalNetwork?: boolean;
   /** The child components that the IdentityProvider will wrap. This allows any child component to access the authentication context provided by the IdentityProvider. */
   children: ReactNode;
 }) {
+  // const state = useRef<State>({
+  //   isInitializing: true,
+  //   prepareLoginStatus: "idle",
+  //   loginStatus: "idle",
+  // });
+
   const [state, setState] = useState<State>({
     isInitializing: true,
     prepareLoginStatus: "idle",
@@ -108,16 +125,14 @@ export function IdentityProvider({
   });
 
   function updateState(newState: Partial<State>) {
-    setState((prevState) => ({
-      ...prevState,
-      ...newState,
-    }));
+    setState((prevState) => ({ ...prevState, ...newState }));
+    // state = { ...state, ...newState };
   }
 
   // Keep track of the promise handlers for the login method during the async login process.
   const loginPromiseHandlers = useRef<{
     resolve: (
-      value: DelegationIdentity | PromiseLike<DelegationIdentity>
+      value: IdentityLoginResponse | PromiseLike<IdentityLoginResponse>
     ) => void;
     reject: (error: Error) => void;
   } | null>(null);
@@ -143,7 +158,11 @@ export function IdentityProvider({
    * This function is called when the signMessage hook has settled, that is, when the
    * user has signed the message or canceled the signing process.
    */
-  async function onLoginSignatureSettled(username: string) {
+  async function onLoginSignatureSettled(
+    webauthnResponse: string,
+    authenticationState?: string,
+    username?: string
+  ) {
     // Important for security! A random session identity is created on each login.
     const sessionIdentity = Ed25519KeyIdentity.generate();
     const sessionPublicKey = sessionIdentity.getPublicKey().toDer();
@@ -156,26 +175,28 @@ export function IdentityProvider({
     // Logging in is a two-step process. First, the signed SIWP message is sent to the backend.
     // Then, the backend's siwp_get_delegation method is called to get the delegation.
 
-    let loginOkResponse: LoginOkResponse;
+    let loginOkResponse: BindingDelegationDeatils;
     try {
       loginOkResponse = await callLogin(
         state.anonymousActor,
-        username,
-        sessionPublicKey
+        webauthnResponse,
+        sessionPublicKey,
+        authenticationState,
+        username
       );
     } catch (e) {
       rejectLoginWithError(e, "Unable to login.");
       return;
     }
-
+    console.log("loginOkResponse", loginOkResponse);
     // Call the backend's siwp_get_delegation method to get the delegation.
     let signedDelegation: ServiceSignedDelegation;
     try {
       signedDelegation = await callGetDelegation(
         state.anonymousActor,
-        username,
+        loginOkResponse.username,
         sessionPublicKey,
-        loginOkResponse.expiration
+        loginOkResponse.login_details.expiration
       );
     } catch (e) {
       rejectLoginWithError(e, "Unable to get identity.");
@@ -185,7 +206,7 @@ export function IdentityProvider({
     // Create a new delegation chain from the delegation.
     const delegationChain = createDelegationChain(
       signedDelegation,
-      loginOkResponse.user_canister_pubkey
+      loginOkResponse.login_details.user_canister_pubkey
     );
 
     // Create a new delegation identity from the session identity and the
@@ -196,17 +217,22 @@ export function IdentityProvider({
     );
 
     // Save the identity to local storage.
-    saveIdentity(username, sessionIdentity, delegationChain);
+    saveIdentity(loginOkResponse.username, sessionIdentity, delegationChain);
 
     // Set the identity in state.
     updateState({
       loginStatus: "success",
-      identityAddress: username,
+      uid: loginOkResponse.username,
       identity,
       delegationChain,
     });
 
-    loginPromiseHandlers.current?.resolve(identity);
+    loginPromiseHandlers.current?.resolve({
+      identity,
+      username: loginOkResponse.username,
+      sessionIdentity,
+      delegationChain,
+    });
   }
 
   /**
@@ -217,9 +243,8 @@ export function IdentityProvider({
    * the loginError property.
    */
 
-  // todo: loginUsername / loginFast
-  async function login(currentUsername: string) {
-    const promise = new Promise<DelegationIdentity>((resolve, reject) => {
+  async function login(loginUid?: string) {
+    const promise = new Promise<IdentityLoginResponse>((resolve, reject) => {
       loginPromiseHandlers.current = { resolve, reject };
     });
     // Set the promise handlers immediately to ensure they are available for error handling.
@@ -245,11 +270,60 @@ export function IdentityProvider({
       loginError: undefined,
     });
 
-    await onLoginSignatureSettled(currentUsername);
+    updateState({
+      prepareLoginStatus: "preparing",
+      prepareLoginError: undefined,
+    });
+
+    let webauthnResponse: string = "";
+    let authenticationState: string = "";
+
+    try {
+      const _prepareLoginResponse = await callPrepareLogin(
+        state.anonymousActor,
+        loginUid
+      );
+
+      if (loginUid && typeof _prepareLoginResponse === "string") {
+        webauthnResponse = _prepareLoginResponse;
+
+        updateState({
+          prepareLoginStatus: "success",
+        });
+      } else if (
+        Array.isArray(_prepareLoginResponse) &&
+        _prepareLoginResponse[0] &&
+        _prepareLoginResponse[1]
+      ) {
+        webauthnResponse = _prepareLoginResponse[0];
+        authenticationState = _prepareLoginResponse[1];
+
+        updateState({
+          prepareLoginStatus: "success",
+        });
+      } else {
+        throw new Error("Invalid authentication response");
+      }
+    } catch (e) {
+      const error = normalizeError(e);
+      console.error(error);
+      updateState({
+        prepareLoginStatus: "error",
+        prepareLoginError: error,
+      });
+
+      rejectLoginWithError(error || new Error("Unable to login."));
+      return promise;
+    }
+
+    await onLoginSignatureSettled(
+      webauthnResponse,
+      authenticationState,
+      loginUid
+    );
 
     return promise;
   }
-
   /**
    * Clears the state and local storage. Effectively "logs the user out".
    */
@@ -261,7 +335,7 @@ export function IdentityProvider({
       loginStatus: "idle",
       loginError: undefined,
       identity: undefined,
-      identityAddress: undefined,
+      uid: undefined,
       delegationChain: undefined,
     });
     clearIdentity();
@@ -274,7 +348,7 @@ export function IdentityProvider({
     try {
       const [a, i, d] = loadIdentity();
       updateState({
-        identityAddress: a,
+        uid: a,
         identity: i,
         delegationChain: d,
         isInitializing: false,
@@ -299,11 +373,12 @@ export function IdentityProvider({
       canisterId,
       httpAgentOptions,
       actorOptions,
+      isLocalNetwork,
     });
     updateState({
       anonymousActor: a,
     });
-  }, [idlFactory, canisterId, httpAgentOptions, actorOptions]);
+  }, [idlFactory, canisterId, httpAgentOptions, actorOptions, isLocalNetwork]);
 
   return (
     <IdentityContext.Provider

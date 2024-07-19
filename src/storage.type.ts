@@ -1,5 +1,5 @@
 export type SiweIdentityStorage = {
-  address: string;
+  uid: string;
   sessionIdentity: string;
   delegationChain: string;
 };

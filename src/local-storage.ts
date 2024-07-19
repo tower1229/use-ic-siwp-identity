@@ -6,20 +6,20 @@ import {
 
 import type { SiweIdentityStorage } from "./storage.type";
 
-const STORAGE_KEY = "siwpIdentity";
+export const SIWP_STORAGE_KEY = "siwp-identity";
 
 /**
  * Loads the SIWP identity from local storage.
  */
 export function loadIdentity() {
-  const storedState = localStorage.getItem(STORAGE_KEY);
+  const storedState = localStorage.getItem(SIWP_STORAGE_KEY);
 
   if (!storedState) {
     throw new Error("No stored identity found.");
   }
 
   const s: SiweIdentityStorage = JSON.parse(storedState);
-  if (!s.address || !s.sessionIdentity || !s.delegationChain) {
+  if (!s.uid || !s.sessionIdentity || !s.delegationChain) {
     throw new Error("Stored state is invalid.");
   }
 
@@ -29,21 +29,21 @@ export function loadIdentity() {
     d
   );
 
-  return [s.address, i, d] as const;
+  return [s.uid, i, d] as const;
 }
 
 /**
  * Saves the SIWP identity to local storage.
  */
 export function saveIdentity(
-  address: string,
+  uid: string,
   sessionIdentity: Ed25519KeyIdentity,
   delegationChain: DelegationChain
 ) {
   localStorage.setItem(
-    STORAGE_KEY,
+    SIWP_STORAGE_KEY,
     JSON.stringify({
-      address: address,
+      uid: uid,
       sessionIdentity: sessionIdentity.toJSON(),
       delegationChain: delegationChain.toJSON(),
     })
@@ -54,5 +54,5 @@ export function saveIdentity(
  * Clears the SIWP identity from local storage.
  */
 export function clearIdentity() {
-  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(SIWP_STORAGE_KEY);
 }
