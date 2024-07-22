@@ -1,6 +1,6 @@
 {
   "name": "use-ic-siwp-identity",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "React hook and context provider for easy frontend integration with SIWP enabled Internet Computer canisters.",
   "repository": {
     "type": "git",

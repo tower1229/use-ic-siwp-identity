@@ -1,21 +1,19 @@
-import {
-  DelegationChain,
-  DelegationIdentity,
-  Ed25519KeyIdentity,
-} from "@dfinity/identity";
-import type { LoginStatus, PrepareLoginStatus } from "./state.type";
+import { DelegationChain, DelegationIdentity } from "@dfinity/identity";
+import type {
+  LoginStatus,
+  PrepareLoginStatus,
+  AnonymousActor,
+} from "./state.type";
 
 export type IdentityLoginResponse = {
-  identity: DelegationIdentity;
+  identity?: DelegationIdentity;
   username: string;
-  sessionIdentity: Ed25519KeyIdentity;
-  delegationChain: DelegationChain;
+  webauthnResponse: string;
+  authenticationState?: string;
 };
 
 export type IdentityContextType = {
-  // currentUsername
-  uid?: string;
-
+  anonymousActor?: AnonymousActor;
   /** Is set to `true` on mount until a stored identity is loaded from local storage or
    * none is found. */
   isInitializing: boolean;
@@ -39,7 +37,10 @@ export type IdentityContextType = {
   prepareLoginError?: Error;
 
   /** Initiates the login process by passkey authentication. */
-  login: (uid?: string) => Promise<IdentityLoginResponse>;
+  login: (
+    uid?: string,
+    JUST_PASSKEY?: boolean
+  ) => Promise<IdentityLoginResponse>;
 
   /** Reflects the current status of the login process. */
   loginStatus: LoginStatus;
@@ -67,10 +68,8 @@ export type IdentityContextType = {
    * or completing the login process. */
   identity?: DelegationIdentity;
 
-  /** The Ethereum address associated with current identity. This address is not necessarily
-   * the same as the address of the currently connected wallet - on wallet change, the addresses
-   * will differ. */
-  identityAddress?: string;
+  /** The uid with current identity. */
+  identityId?: string;
 
   /** Clears the identity from the state and local storage. Effectively "logs the user out". */
   clear: () => void;

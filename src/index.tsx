@@ -25,7 +25,7 @@ import {
   createAnonymousActor,
   callPrepareLogin,
 } from "./siwp-provider";
-import type { State } from "./state.type";
+import type { State, AnonymousActor } from "./state.type";
 import { createDelegationChain } from "./delegation";
 import { normalizeError } from "./error";
 
@@ -54,6 +54,115 @@ export const useIcIdentity = (): IdentityContextType => {
   }
   return context;
 };
+
+/**
+ * This function is called when the webauthn hook has settled, that is, when the
+ * user has auth the challenge or canceled the signing process.
+ */
+export async function onWebauthnSettled(
+  webauthnResponse: string,
+  authenticationState?: string,
+  username?: string,
+  anonymousActor?: AnonymousActor,
+  rejectLoginWithError: (error: Error | unknown, message?: string) => void = (
+    e: unknown
+  ) => {
+    throw e;
+  },
+  updateState?: (newState: Partial<State>) => void,
+  loginPromiseHandlers?: React.MutableRefObject<{
+    resolve: (
+      value: IdentityLoginResponse | PromiseLike<IdentityLoginResponse>
+    ) => void;
+    reject: (error: Error) => void;
+  } | null>,
+  JUST_PASSKEY?: boolean
+) {
+  if (JUST_PASSKEY && username) {
+    const loginResponse = {
+      webauthnResponse,
+      username,
+    };
+
+    loginPromiseHandlers?.current?.resolve(loginResponse);
+
+    return loginResponse;
+  } else {
+    // Important for security! A random session identity is created on each login.
+    const sessionIdentity = Ed25519KeyIdentity.generate();
+    const sessionPublicKey = sessionIdentity.getPublicKey().toDer();
+
+    if (!anonymousActor) {
+      rejectLoginWithError(new Error("Invalid actor or address."));
+      return;
+    }
+
+    // Logging in is a two-step process. First, the signed SIWP message is sent to the backend.
+    // Then, the backend's siwp_get_delegation method is called to get the delegation.
+
+    let loginOkResponse: BindingDelegationDeatils;
+    try {
+      loginOkResponse = await callLogin(
+        anonymousActor,
+        webauthnResponse,
+        sessionPublicKey,
+        authenticationState,
+        username
+      );
+    } catch (e) {
+      rejectLoginWithError(e, "Unable to login.");
+      return;
+    }
+    // Call the backend's siwp_get_delegation method to get the delegation.
+    let signedDelegation: ServiceSignedDelegation;
+    try {
+      signedDelegation = await callGetDelegation(
+        anonymousActor,
+        loginOkResponse.username,
+        sessionPublicKey,
+        loginOkResponse.login_details.expiration
+      );
+    } catch (e) {
+      rejectLoginWithError(e, "Unable to get identity.");
+      return;
+    }
+
+    // Create a new delegation chain from the delegation.
+    const delegationChain = createDelegationChain(
+      signedDelegation,
+      loginOkResponse.login_details.user_canister_pubkey
+    );
+
+    // Create a new delegation identity from the session identity and the
+    // delegation chain.
+    const identity = DelegationIdentity.fromDelegation(
+      sessionIdentity,
+      delegationChain
+    );
+
+    // Save the identity to local storage.
+    saveIdentity(loginOkResponse.username, sessionIdentity, delegationChain);
+
+    // Set the identity in state.
+    updateState?.({
+      loginStatus: "success",
+      identityId: loginOkResponse.username,
+      identity,
+      delegationChain,
+    });
+
+    const loginResponse = {
+      identity,
+      username: loginOkResponse.username,
+      webauthnResponse,
+      authenticationState,
+    };
+
+    loginPromiseHandlers?.current?.resolve(loginResponse);
+
+    return loginResponse;
+  }
+}
 
 /**
  * Provider component for the SIWP identity context. Manages identity state and provides authentication-related functionalities.
@@ -155,87 +264,6 @@ export function IdentityProvider({
   }
 
   /**
-   * This function is called when the signMessage hook has settled, that is, when the
-   * user has signed the message or canceled the signing process.
-   */
-  async function onLoginSignatureSettled(
-    webauthnResponse: string,
-    authenticationState?: string,
-    username?: string
-  ) {
-    // Important for security! A random session identity is created on each login.
-    const sessionIdentity = Ed25519KeyIdentity.generate();
-    const sessionPublicKey = sessionIdentity.getPublicKey().toDer();
-
-    if (!state.anonymousActor) {
-      rejectLoginWithError(new Error("Invalid actor or address."));
-      return;
-    }
-
-    // Logging in is a two-step process. First, the signed SIWP message is sent to the backend.
-    // Then, the backend's siwp_get_delegation method is called to get the delegation.
-
-    let loginOkResponse: BindingDelegationDeatils;
-    try {
-      loginOkResponse = await callLogin(
-        state.anonymousActor,
-        webauthnResponse,
-        sessionPublicKey,
-        authenticationState,
-        username
-      );
-    } catch (e) {
-      rejectLoginWithError(e, "Unable to login.");
-      return;
-    }
-    console.log("loginOkResponse", loginOkResponse);
-    // Call the backend's siwp_get_delegation method to get the delegation.
-    let signedDelegation: ServiceSignedDelegation;
-    try {
-      signedDelegation = await callGetDelegation(
-        state.anonymousActor,
-        loginOkResponse.username,
-        sessionPublicKey,
-        loginOkResponse.login_details.expiration
-      );
-    } catch (e) {
-      rejectLoginWithError(e, "Unable to get identity.");
-      return;
-    }
-
-    // Create a new delegation chain from the delegation.
-    const delegationChain = createDelegationChain(
-      signedDelegation,
-      loginOkResponse.login_details.user_canister_pubkey
-    );
-
-    // Create a new delegation identity from the session identity and the
-    // delegation chain.
-    const identity = DelegationIdentity.fromDelegation(
-      sessionIdentity,
-      delegationChain
-    );
-
-    // Save the identity to local storage.
-    saveIdentity(loginOkResponse.username, sessionIdentity, delegationChain);
-
-    // Set the identity in state.
-    updateState({
-      loginStatus: "success",
-      uid: loginOkResponse.username,
-      identity,
-      delegationChain,
-    });
-
-    loginPromiseHandlers.current?.resolve({
-      identity,
-      username: loginOkResponse.username,
-      sessionIdentity,
-      delegationChain,
-    });
-  }
-
-  /**
    * Initiates the login process. If a SIWP message is not already available, it will be
    * generated by calling prepareLogin.
    *
@@ -243,7 +271,7 @@ export function IdentityProvider({
    * the loginError property.
    */
 
-  async function login(loginUid?: string) {
+  async function login(loginUid?: string, JUST_PASSKEY?: boolean) {
     const promise = new Promise<IdentityLoginResponse>((resolve, reject) => {
       loginPromiseHandlers.current = { resolve, reject };
     });
@@ -316,10 +344,15 @@ export function IdentityProvider({
       return promise;
     }
 
-    await onLoginSignatureSettled(
+    await onWebauthnSettled(
       webauthnResponse,
       authenticationState,
-      loginUid
+      loginUid,
+      state.anonymousActor,
+      rejectLoginWithError,
+      updateState,
+      loginPromiseHandlers,
+      JUST_PASSKEY
     );
 
     return promise;
@@ -335,7 +368,7 @@ export function IdentityProvider({
       loginStatus: "idle",
       loginError: undefined,
       identity: undefined,
-      uid: undefined,
+      identityId: undefined,
       delegationChain: undefined,
     });
     clearIdentity();
@@ -348,7 +381,7 @@ export function IdentityProvider({
     try {
       const [a, i, d] = loadIdentity();
       updateState({
-        uid: a,
+        identityId: a,
         identity: i,
         delegationChain: d,
         isInitializing: false,
