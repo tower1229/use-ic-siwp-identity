@@ -28,7 +28,7 @@ export function createAnonymousActor({
   isLocalNetwork?: boolean;
 }) {
   if (!idlFactory || !canisterId) return;
-  const agent = new HttpAgent({ ...httpAgentOptions });
+  const agent = new HttpAgent({ retryTimes: 2, ...httpAgentOptions });
 
   if (isLocalNetwork) {
     agent.fetchRootKey().catch((err) => {
@@ -38,7 +38,6 @@ export function createAnonymousActor({
       console.error(err);
     });
   }
-
   return Actor.createActor<IDENTITY_SERVICE>(idlFactory, {
     agent,
     canisterId,
@@ -92,19 +91,24 @@ export async function callLogin(
     throw new Error("Invalid actor");
   }
 
-  const loginReponse =
-    username === undefined && authenticationState
-      ? await anonymousActor.siwp_login(
-          webauthnResponse,
-          authenticationState,
-          new Uint8Array(sessionPublicKey),
-          []
-        )
-      : await anonymousActor.siwp_login_username(
-          webauthnResponse,
-          new Uint8Array(sessionPublicKey),
-          []
-        );
+  let loginReponse;
+  try {
+    loginReponse =
+      username === undefined && authenticationState
+        ? await anonymousActor.siwp_login(
+            webauthnResponse,
+            authenticationState,
+            new Uint8Array(sessionPublicKey),
+            []
+          )
+        : await anonymousActor.siwp_login_username(
+            webauthnResponse,
+            new Uint8Array(sessionPublicKey),
+            []
+          );
+  } catch (e) {
+    throw new Error((e as Error).message);
+  }
 
   if ("Err" in loginReponse) {
     throw new Error(loginReponse.Err);

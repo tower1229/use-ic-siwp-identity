@@ -7,7 +7,11 @@ import {
   useState,
   useRef,
 } from "react";
-import { type ActorConfig, type HttpAgentOptions } from "@dfinity/agent";
+import {
+  type ActorConfig,
+  type HttpAgentOptions,
+  type DerEncodedPublicKey,
+} from "@dfinity/agent";
 import { DelegationIdentity, Ed25519KeyIdentity } from "@dfinity/identity";
 import type {
   IdentityContextType,
@@ -15,6 +19,7 @@ import type {
 } from "./context.type";
 import { IDL } from "@dfinity/candid";
 import type {
+  PublicKey,
   BindingDelegationDeatils,
   SignedDelegation as ServiceSignedDelegation,
 } from "./service.interface";
@@ -36,7 +41,8 @@ export * from "./context.type";
 export * from "./service.interface";
 export * from "./storage.type";
 export * from "./local-storage";
-
+export * from "./delegation";
+export * from "./state.type";
 /**
  * React context for managing SIWP (Sign-In with Passkey) identity.
  */
@@ -54,115 +60,6 @@ export const useIcIdentity = (): IdentityContextType => {
   }
   return context;
 };
-
-/**
- * This function is called when the webauthn hook has settled, that is, when the
- * user has auth the challenge or canceled the signing process.
- */
-export async function onWebauthnSettled(
-  webauthnResponse: string,
-  authenticationState?: string,
-  username?: string,
-  anonymousActor?: AnonymousActor,
-  rejectLoginWithError: (error: Error | unknown, message?: string) => void = (
-    e: unknown
-  ) => {
-    throw e;
-  },
-  updateState?: (newState: Partial<State>) => void,
-  loginPromiseHandlers?: React.MutableRefObject<{
-    resolve: (
-      value: IdentityLoginResponse | PromiseLike<IdentityLoginResponse>
-    ) => void;
-    reject: (error: Error) => void;
-  } | null>,
-  JUST_PASSKEY?: boolean
-) {
-  if (JUST_PASSKEY && username) {
-    const loginResponse = {
-      webauthnResponse,
-      username,
-    };
-
-    loginPromiseHandlers?.current?.resolve(loginResponse);
-
-    return loginResponse;
-  } else {
-    // Important for security! A random session identity is created on each login.
-    const sessionIdentity = Ed25519KeyIdentity.generate();
-    const sessionPublicKey = sessionIdentity.getPublicKey().toDer();
-
-    if (!anonymousActor) {
-      rejectLoginWithError(new Error("Invalid actor or address."));
-      return;
-    }
-
-    // Logging in is a two-step process. First, the signed SIWP message is sent to the backend.
-    // Then, the backend's siwp_get_delegation method is called to get the delegation.
-
-    let loginOkResponse: BindingDelegationDeatils;
-    try {
-      loginOkResponse = await callLogin(
-        anonymousActor,
-        webauthnResponse,
-        sessionPublicKey,
-        authenticationState,
-        username
-      );
-    } catch (e) {
-      rejectLoginWithError(e, "Unable to login.");
-      return;
-    }
-    // Call the backend's siwp_get_delegation method to get the delegation.
-    let signedDelegation: ServiceSignedDelegation;
-    try {
-      signedDelegation = await callGetDelegation(
-        anonymousActor,
-        loginOkResponse.username,
-        sessionPublicKey,
-        loginOkResponse.login_details.expiration
-      );
-    } catch (e) {
-      rejectLoginWithError(e, "Unable to get identity.");
-      return;
-    }
-
-    // Create a new delegation chain from the delegation.
-    const delegationChain = createDelegationChain(
-      signedDelegation,
-      loginOkResponse.login_details.user_canister_pubkey
-    );
-
-    // Create a new delegation identity from the session identity and the
-    // delegation chain.
-    const identity = DelegationIdentity.fromDelegation(
-      sessionIdentity,
-      delegationChain
-    );
-
-    // Save the identity to local storage.
-    saveIdentity(loginOkResponse.username, sessionIdentity, delegationChain);
-
-    // Set the identity in state.
-    updateState?.({
-      loginStatus: "success",
-      identityId: loginOkResponse.username,
-      identity,
-      delegationChain,
-    });
-
-    const loginResponse = {
-      identity,
-      username: loginOkResponse.username,
-      webauthnResponse,
-      authenticationState,
-    };
-
-    loginPromiseHandlers?.current?.resolve(loginResponse);
-
-    return loginResponse;
-  }
-}
 
 /**
  * Provider component for the SIWP identity context. Manages identity state and provides authentication-related functionalities.
@@ -221,12 +118,6 @@ export function IdentityProvider({
   /** The child components that the IdentityProvider will wrap. This allows any child component to access the authentication context provided by the IdentityProvider. */
   children: ReactNode;
 }) {
-  // const state = useRef<State>({
-  //   isInitializing: true,
-  //   prepareLoginStatus: "idle",
-  //   loginStatus: "idle",
-  // });
-
   const [state, setState] = useState<State>({
     isInitializing: true,
     prepareLoginStatus: "idle",
@@ -242,6 +133,14 @@ export function IdentityProvider({
   const loginPromiseHandlers = useRef<{
     resolve: (
       value: IdentityLoginResponse | PromiseLike<IdentityLoginResponse>
+    ) => void;
+    reject: (error: Error) => void;
+  } | null>(null);
+
+  // Keep track of the promise handlers for the login method during the async login process.
+  const loginWithPublicKeyPromiseHandlers = useRef<{
+    resolve: (
+      value: BindingDelegationDeatils | PromiseLike<BindingDelegationDeatils>
     ) => void;
     reject: (error: Error) => void;
   } | null>(null);
@@ -264,14 +163,152 @@ export function IdentityProvider({
   }
 
   /**
-   * Initiates the login process. If a SIWP message is not already available, it will be
-   * generated by calling prepareLogin.
+   * This function is called when the webauthn hook has settled, that is, when the
+   * user has auth the challenge or canceled the signing process.
+   */
+  async function onWebauthnSettled(
+    anonymousActor: AnonymousActor,
+    webauthnResponse: string,
+    authenticationState?: string,
+    username?: string,
+    customSessionPublicKey?: DerEncodedPublicKey
+  ) {
+    if (!anonymousActor) {
+      rejectLoginWithError(new Error("Invalid actor or address."));
+      return;
+    }
+
+    let loginOkResponse: BindingDelegationDeatils;
+
+    if (customSessionPublicKey) {
+      try {
+        loginOkResponse = await callLogin(
+          anonymousActor,
+          webauthnResponse,
+          customSessionPublicKey,
+          authenticationState,
+          username
+        );
+      } catch (e) {
+        console.warn(e, customSessionPublicKey);
+        rejectLoginWithError(e, "Login error with customSessionPublicKey.");
+        return;
+      }
+
+      loginWithPublicKeyPromiseHandlers?.current?.resolve(loginOkResponse);
+    } else {
+      // Important for security! A random session identity is created on each login.
+      const sessionIdentity = Ed25519KeyIdentity.generate();
+      const sessionPublicKey = sessionIdentity.getPublicKey().toDer();
+
+      // Logging in is a two-step process. First, the signed SIWP message is sent to the backend.
+      // Then, the backend's siwp_get_delegation method is called to get the delegation.
+
+      try {
+        loginOkResponse = await callLogin(
+          anonymousActor,
+          webauthnResponse,
+          sessionPublicKey,
+          authenticationState,
+          username
+        );
+      } catch (e) {
+        rejectLoginWithError(e, "Unable to login.");
+        return;
+      }
+
+      const response = await getDelegation(
+        loginOkResponse.username,
+        sessionPublicKey,
+        sessionIdentity,
+        loginOkResponse.login_details.expiration,
+        loginOkResponse.login_details.user_canister_pubkey
+      ).catch((e) => {
+        rejectLoginWithError(e);
+        return;
+      });
+
+      response && loginPromiseHandlers?.current?.resolve(response);
+    }
+  }
+
+  /**
+   * Call the backend's siwp_get_delegation method to get the delegation.
+   */
+  async function getDelegation(
+    identityId: string,
+    sessionPublicKey: DerEncodedPublicKey,
+    sessionIdentity: Ed25519KeyIdentity,
+    expiration: bigint,
+    user_canister_pubkey: PublicKey
+  ) {
+    if (!state.anonymousActor) {
+      throw new Error(
+        "Hook not initialized properly. Make sure to supply all required props to the IdentityProvider."
+      );
+    }
+
+    // Logging in is a two-step process. First, the signed SIWP message is sent to the backend.
+    // Then, the backend's siwp_get_delegation method is called to get the delegation.
+
+    // Call the backend's siwp_get_delegation method to get the delegation.
+    let signedDelegation: ServiceSignedDelegation;
+    try {
+      signedDelegation = await callGetDelegation(
+        state.anonymousActor,
+        identityId,
+        sessionPublicKey,
+        expiration
+      );
+    } catch (e) {
+      throw new Error("Unable to get identity.");
+    }
+
+    // Create a new delegation chain from the delegation.
+    const delegationChain = createDelegationChain(
+      signedDelegation,
+      user_canister_pubkey
+    );
+
+    // Create a new delegation identity from the session identity and the
+    // delegation chain.
+    const identity = DelegationIdentity.fromDelegation(
+      sessionIdentity,
+      delegationChain
+    );
+
+    // Save the identity to local storage.
+    saveIdentity(identityId, sessionIdentity, delegationChain);
+
+    // Set the identity in state.
+    updateState?.({
+      loginStatus: "success",
+      identityId,
+      identity,
+      delegationChain,
+      identityActor: createAnonymousActor({
+        idlFactory,
+        canisterId,
+        httpAgentOptions: { ...(httpAgentOptions || {}), identity },
+        actorOptions,
+        isLocalNetwork,
+      }),
+    });
+
+    return {
+      identity,
+      username: identityId,
+    };
+  }
+
+  /**
+   * Initiates the login process.
    *
    * @returns {void} Login does not return anything. If an error occurs, the error is available in
    * the loginError property.
    */
 
-  async function login(loginUid?: string, JUST_PASSKEY?: boolean) {
+  async function login(loginUid?: string) {
     const promise = new Promise<IdentityLoginResponse>((resolve, reject) => {
       loginPromiseHandlers.current = { resolve, reject };
     });
@@ -345,18 +382,109 @@ export function IdentityProvider({
     }
 
     await onWebauthnSettled(
+      state.anonymousActor,
       webauthnResponse,
       authenticationState,
-      loginUid,
-      state.anonymousActor,
-      rejectLoginWithError,
-      updateState,
-      loginPromiseHandlers,
-      JUST_PASSKEY
+      loginUid
     );
 
     return promise;
   }
+
+  /**
+   * Initiates the loginWithSessionKey process.
+   *
+   * @returns {void} Login does not return anything. If an error occurs, the error is available in
+   * the loginError property.
+   */
+
+  async function loginWithSessionKey(
+    sessionPublicKey: DerEncodedPublicKey,
+    loginUid?: string
+  ) {
+    const promise = new Promise<BindingDelegationDeatils>((resolve, reject) => {
+      loginWithPublicKeyPromiseHandlers.current = { resolve, reject };
+    });
+    // Set the promise handlers immediately to ensure they are available for error handling.
+
+    if (!state.anonymousActor) {
+      rejectLoginWithError(
+        new Error(
+          "Hook not initialized properly. Make sure to supply all required props to the IdentityProvider."
+        )
+      );
+      return promise;
+    }
+
+    if (state.prepareLoginStatus === "preparing") {
+      rejectLoginWithError(
+        new Error("Don't call login while prepareLogin is running.")
+      );
+      return promise;
+    }
+
+    updateState({
+      loginStatus: "logging-in",
+      loginError: undefined,
+    });
+
+    updateState({
+      prepareLoginStatus: "preparing",
+      prepareLoginError: undefined,
+    });
+
+    let webauthnResponse: string = "";
+    let authenticationState: string = "";
+
+    try {
+      const _prepareLoginResponse = await callPrepareLogin(
+        state.anonymousActor,
+        loginUid
+      );
+
+      if (loginUid && typeof _prepareLoginResponse === "string") {
+        webauthnResponse = _prepareLoginResponse;
+
+        updateState({
+          prepareLoginStatus: "success",
+        });
+      } else if (
+        Array.isArray(_prepareLoginResponse) &&
+        _prepareLoginResponse[0] &&
+        _prepareLoginResponse[1]
+      ) {
+        webauthnResponse = _prepareLoginResponse[0];
+        authenticationState = _prepareLoginResponse[1];
+
+        updateState({
+          prepareLoginStatus: "success",
+        });
+      } else {
+        throw new Error("Invalid authentication response");
+      }
+    } catch (e) {
+      const error = normalizeError(e);
+      console.error(error);
+      updateState({
+        prepareLoginStatus: "error",
+        prepareLoginError: error,
+      });
+
+      rejectLoginWithError(error || new Error("Unable to login."));
+      return promise;
+    }
+
+    await onWebauthnSettled(
+      state.anonymousActor,
+      webauthnResponse,
+      authenticationState,
+      loginUid,
+      sessionPublicKey
+    );
+
+    return promise;
+  }
+
   /**
    * Clears the state and local storage. Effectively "logs the user out".
    */
@@ -370,6 +498,7 @@ export function IdentityProvider({
       identity: undefined,
       identityId: undefined,
       delegationChain: undefined,
+      identityActor: undefined,
     });
     clearIdentity();
   }
@@ -385,6 +514,13 @@ export function IdentityProvider({
         identity: i,
         delegationChain: d,
         isInitializing: false,
+        identityActor: createAnonymousActor({
+          idlFactory,
+          canisterId,
+          httpAgentOptions: { ...(httpAgentOptions || {}), identity: i },
+          actorOptions,
+          isLocalNetwork,
+        }),
       });
     } catch (e) {
       if (e instanceof Error) {
@@ -422,6 +558,8 @@ export function IdentityProvider({
         isPrepareLoginSuccess: state.prepareLoginStatus === "success",
         isPrepareLoginIdle: state.prepareLoginStatus === "idle",
         login,
+        loginWithSessionKey,
+        getDelegation,
         isLoggingIn: state.loginStatus === "logging-in",
         isLoginError: state.loginStatus === "error",
         isLoginSuccess: state.loginStatus === "success",

@@ -1,15 +1,23 @@
-import { DelegationChain, DelegationIdentity } from "@dfinity/identity";
+import {
+  DelegationChain,
+  DelegationIdentity,
+  Ed25519KeyIdentity,
+} from "@dfinity/identity";
+import type { DerEncodedPublicKey } from "@dfinity/agent";
 import type {
   LoginStatus,
   PrepareLoginStatus,
   AnonymousActor,
+  IdentityActor,
 } from "./state.type";
+import {
+  type BindingDelegationDeatils,
+  type PublicKey,
+} from "./service.interface";
 
 export type IdentityLoginResponse = {
   identity?: DelegationIdentity;
   username: string;
-  webauthnResponse: string;
-  authenticationState?: string;
 };
 
 export type IdentityContextType = {
@@ -37,10 +45,20 @@ export type IdentityContextType = {
   prepareLoginError?: Error;
 
   /** Initiates the login process by passkey authentication. */
-  login: (
-    uid?: string,
-    JUST_PASSKEY?: boolean
-  ) => Promise<IdentityLoginResponse>;
+  login: (uid?: string) => Promise<IdentityLoginResponse>;
+
+  loginWithSessionKey: (
+    sessionPublicKey: DerEncodedPublicKey,
+    loginUid?: string
+  ) => Promise<BindingDelegationDeatils>;
+
+  getDelegation(
+    identityId: string,
+    sessionPublicKey: DerEncodedPublicKey,
+    sessionIdentity: Ed25519KeyIdentity,
+    expiration: bigint,
+    user_canister_pubkey: PublicKey
+  ): Promise<IdentityLoginResponse>;
 
   /** Reflects the current status of the login process. */
   loginStatus: LoginStatus;
@@ -70,6 +88,8 @@ export type IdentityContextType = {
 
   /** The uid with current identity. */
   identityId?: string;
+
+  identityActor?: IdentityActor;
 
   /** Clears the identity from the state and local storage. Effectively "logs the user out". */
   clear: () => void;
