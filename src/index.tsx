@@ -96,6 +96,7 @@ export function IdentityProvider({
   idlFactory,
   canisterId,
   isLocalNetwork,
+  expiration,
   children,
 }: {
   /** Configuration options for the HTTP agent used to communicate with the Internet Computer network. */
@@ -115,6 +116,10 @@ export function IdentityProvider({
    * This is useful for testing purposes.
    */
   isLocalNetwork?: boolean;
+
+  /** Set the idle time (in ms) before the session key expires. **/
+  expiration?: number;
+
   /** The child components that the IdentityProvider will wrap. This allows any child component to access the authentication context provided by the IdentityProvider. */
   children: ReactNode;
 }) {
@@ -187,7 +192,8 @@ export function IdentityProvider({
           webauthnResponse,
           customSessionPublicKey,
           authenticationState,
-          username
+          username,
+          expiration
         );
       } catch (e) {
         console.warn(e, customSessionPublicKey);
@@ -210,13 +216,15 @@ export function IdentityProvider({
           webauthnResponse,
           sessionPublicKey,
           authenticationState,
-          username
+          username,
+          expiration
         );
       } catch (e) {
         rejectLoginWithError(e, "Unable to login.");
         return;
       }
 
+      console.warn("debug loginOkResponse", loginOkResponse);
       const response = await getDelegation(
         loginOkResponse.username,
         sessionPublicKey,

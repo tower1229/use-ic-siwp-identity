@@ -85,7 +85,8 @@ export async function callLogin(
   webauthnResponse: string,
   sessionPublicKey: DerEncodedPublicKey,
   authenticationState?: string,
-  username?: string
+  username?: string,
+  expiration?: number
 ) {
   if (!anonymousActor) {
     throw new Error("Invalid actor");
@@ -99,12 +100,12 @@ export async function callLogin(
             webauthnResponse,
             authenticationState,
             new Uint8Array(sessionPublicKey),
-            []
+            !expiration ? [] : [BigInt(expiration * 1000000)]
           )
         : await anonymousActor.siwp_login_username(
             webauthnResponse,
             new Uint8Array(sessionPublicKey),
-            []
+            !expiration ? [] : [BigInt(expiration * 1000000)]
           );
   } catch (e) {
     throw new Error((e as Error).message);
